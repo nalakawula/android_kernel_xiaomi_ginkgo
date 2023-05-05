@@ -50,6 +50,7 @@
 #include <linux/audit.h>
 #include <linux/mutex.h>
 #include <linux/selinux.h>
+#include <linux/flex_array.h>
 #include <linux/vmalloc.h>
 #include <net/netlabel.h>
 
@@ -437,6 +438,7 @@ mls_ops:
 	return s[0];
 }
 
+#ifdef CONFIG_AUDIT
 /*
  * security_dump_masked_av - dumps masked permissions during
  * security_compute_av due to RBAC, MLS/Constraint and Type bounds.
@@ -527,6 +529,7 @@ out:
 
 	return;
 }
+#endif
 
 /*
  * security_boundary_permission - drops violated permissions
@@ -545,13 +548,15 @@ static void type_attribute_bounds_av(struct policydb *policydb,
 	struct type_datum *target;
 	u32 masked = 0;
 
-	source = policydb->type_val_to_struct_array[scontext->type - 1];
+	source = flex_array_get_ptr(policydb->type_val_to_struct_array,
+				    scontext->type - 1);
 	BUG_ON(!source);
 
 	if (!source->bounds)
 		return;
 
-	target = policydb->type_val_to_struct_array[tcontext->type - 1];
+	target = flex_array_get_ptr(policydb->type_val_to_struct_array,
+				    tcontext->type - 1);
 	BUG_ON(!target);
 
 	memset(&lo_avd, 0, sizeof(lo_avd));
@@ -579,9 +584,11 @@ static void type_attribute_bounds_av(struct policydb *policydb,
 	/* mask violated permissions */
 	avd->allowed &= ~masked;
 
+#ifdef CONFIG_AUDIT
 	/* audit masked permissions */
 	security_dump_masked_av(policydb, scontext, tcontext,
 				tclass, masked, "bounds");
+#endif
 }
 
 /*
@@ -651,9 +658,11 @@ static void context_struct_compute_av(struct policydb *policydb,
 	 */
 	avkey.target_class = tclass;
 	avkey.specified = AVTAB_AV | AVTAB_XPERMS;
-	sattr = &policydb->type_attr_map_array[scontext->type - 1];
+	sattr = flex_array_get(policydb->type_attr_map_array,
+			       scontext->type - 1);
 	BUG_ON(!sattr);
-	tattr = &policydb->type_attr_map_array[tcontext->type - 1];
+	tattr = flex_array_get(policydb->type_attr_map_array,
+			       tcontext->type - 1);
 	BUG_ON(!tattr);
 	ebitmap_for_each_positive_bit(sattr, snode, i) {
 		ebitmap_for_each_positive_bit(tattr, tnode, j) {
@@ -720,12 +729,13 @@ static void context_struct_compute_av(struct policydb *policydb,
 				 tclass, avd);
 }
 
-static int security_validtrans_handle_fail(struct selinux_state *state,
+static inline int security_validtrans_handle_fail(struct selinux_state *state,
 					   struct context *ocontext,
 					   struct context *ncontext,
 					   struct context *tcontext,
 					   u16 tclass)
 {
+#ifdef CONFIG_AUDIT
 	struct policydb *p = &state->ss->policydb;
 	char *o = NULL, *n = NULL, *t = NULL;
 	u32 olen, nlen, tlen;
@@ -744,6 +754,7 @@ out:
 	kfree(o);
 	kfree(n);
 	kfree(t);
+#endif
 
 	if (!enforcing_enabled(state))
 		return 0;
@@ -896,7 +907,8 @@ int security_bounded_transition(struct selinux_state *state,
 
 	index = new_context->type;
 	while (true) {
-		type = policydb->type_val_to_struct_array[index - 1];
+		type = flex_array_get_ptr(policydb->type_val_to_struct_array,
+					  index - 1);
 		BUG_ON(!type);
 
 		/* not bounded anymore */
@@ -912,6 +924,7 @@ int security_bounded_transition(struct selinux_state *state,
 		index = type->bounds;
 	}
 
+#ifdef CONFIG_AUDIT
 	if (rc) {
 		char *old_name = NULL;
 		char *new_name = NULL;
@@ -931,6 +944,7 @@ int security_bounded_transition(struct selinux_state *state,
 		kfree(new_name);
 		kfree(old_name);
 	}
+#endif
 out:
 	read_unlock(&state->ss->policy_rwlock);
 
@@ -1059,9 +1073,11 @@ void security_compute_xperms_decision(struct selinux_state *state,
 
 	avkey.target_class = tclass;
 	avkey.specified = AVTAB_XPERMS;
-	sattr = &policydb->type_attr_map_array[scontext->type - 1];
+	sattr = flex_array_get(policydb->type_attr_map_array,
+				scontext->type - 1);
 	BUG_ON(!sattr);
-	tattr = &policydb->type_attr_map_array[tcontext->type - 1];
+	tattr = flex_array_get(policydb->type_attr_map_array,
+				tcontext->type - 1);
 	BUG_ON(!tattr);
 	ebitmap_for_each_positive_bit(sattr, snode, i) {
 		ebitmap_for_each_positive_bit(tattr, tnode, j) {
@@ -1602,13 +1618,14 @@ int security_context_to_sid_force(struct selinux_state *state,
 					    sid, SECSID_NULL, GFP_KERNEL, 1);
 }
 
-static int compute_sid_handle_invalid_context(
+static inline int compute_sid_handle_invalid_context(
 	struct selinux_state *state,
 	struct context *scontext,
 	struct context *tcontext,
 	u16 tclass,
 	struct context *newcontext)
 {
+#ifdef CONFIG_AUDIT
 	struct policydb *policydb = &state->ss->policydb;
 	char *s = NULL, *t = NULL, *n = NULL;
 	u32 slen, tlen, nlen;
@@ -1629,6 +1646,8 @@ out:
 	kfree(s);
 	kfree(t);
 	kfree(n);
+#endif
+
 	if (!enforcing_enabled(state))
 		return 0;
 	return -EACCES;
@@ -1923,18 +1942,22 @@ static inline int convert_context_handle_invalid_context(
 	struct selinux_state *state,
 	struct context *context)
 {
+#ifdef CONFIG_AUDIT
 	struct policydb *policydb = &state->ss->policydb;
 	char *s;
 	u32 len;
+#endif
 
 	if (enforcing_enabled(state))
 		return -EINVAL;
 
+#ifdef CONFIG_AUDIT
 	if (!context_struct_to_string(policydb, context, &s, &len)) {
 		pr_warn("SELinux:  Context %s would be invalid if enforcing\n",
 			s);
 		kfree(s);
 	}
+#endif
 	return 0;
 }
 
@@ -1960,8 +1983,10 @@ static int convert_context(struct context *oldc, struct context *newc, void *p)
 	struct type_datum *typdatum;
 	struct user_datum *usrdatum;
 	char *s;
-	u32 len;
 	int rc;
+#ifdef CONFIG_AUDIT
+	u32 len;
+#endif
 
 	args = p;
 
@@ -2067,6 +2092,7 @@ static int convert_context(struct context *oldc, struct context *newc, void *p)
 
 	return 0;
 bad:
+#ifdef CONFIG_AUDIT
 	/* Map old representation to string and save it. */
 	rc = context_struct_to_string(args->oldp, oldc, &s, &len);
 	if (rc)
@@ -2077,6 +2103,7 @@ bad:
 	newc->hash = context_compute_hash(s);
 	pr_info("SELinux:  Context %s became invalid (unmapped).\n",
 		newc->str);
+#endif
 	return 0;
 }
 
@@ -2131,7 +2158,7 @@ int security_load_policy(struct selinux_state *state, void *data, size_t len)
 	int rc = 0;
 	struct policy_file file = { data, len }, *fp = &file;
 
-	oldpolicydb = kcalloc(2, sizeof(*oldpolicydb), GFP_KERNEL);
+	oldpolicydb = kzalloc(2 * sizeof(*oldpolicydb), GFP_KERNEL);
 	if (!oldpolicydb) {
 		rc = -ENOMEM;
 		goto out;
@@ -2998,9 +3025,11 @@ int security_sid_mls_copy(struct selinux_state *state,
 	struct context *context1;
 	struct context *context2;
 	struct context newcon;
+	int rc;
+#ifdef CONFIG_AUDIT
 	char *s;
 	u32 len;
-	int rc;
+#endif
 
 	rc = 0;
 	if (!state->initialized || !policydb->mls_enabled) {
@@ -3039,6 +3068,7 @@ int security_sid_mls_copy(struct selinux_state *state,
 	if (!policydb_context_isvalid(policydb, &newcon)) {
 		rc = convert_context_handle_invalid_context(state, &newcon);
 		if (rc) {
+#ifdef CONFIG_AUDIT
 			if (!context_struct_to_string(policydb, &newcon, &s,
 						      &len)) {
 				audit_log(current->audit_context,
@@ -3047,6 +3077,7 @@ int security_sid_mls_copy(struct selinux_state *state,
 					  "invalid_context=%s", s);
 				kfree(s);
 			}
+#endif
 			goto out_unlock;
 		}
 	}
@@ -3527,6 +3558,7 @@ out:
 	return match;
 }
 
+#ifdef CONFIG_AUDIT
 static int (*aurule_callback)(void) = audit_update_lsm_rules;
 
 static int aurule_avc_callback(u32 event)
@@ -3549,6 +3581,7 @@ static int __init aurule_init(void)
 	return err;
 }
 __initcall(aurule_init);
+#endif
 
 #ifdef CONFIG_NETLABEL
 /**
